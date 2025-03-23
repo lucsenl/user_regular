@@ -1,0 +1,91 @@
+name: Update List
+
+on:
+  schedule:
+    - cron: '0 12 * * *' # Executa todos os dias ao meio-dia (UTC)
+  workflow_dispatch: # Permite execução manual
+
+jobs:
+  update-list:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar as listas e limpar comentários
+        run: |
+          urls=(
+            "${{ vars.LIST_URL_01 }}"
+            "${{ vars.LIST_URL_02 }}"
+            "${{ vars.LIST_URL_03 }}"
+            "${{ vars.LIST_URL_04 }}"
+            "${{ vars.LIST_URL_05 }}"
+            "${{ vars.LIST_URL_06 }}"
+            "${{ vars.LIST_URL_07 }}"
+            "${{ vars.LIST_URL_08 }}"
+            "${{ vars.LIST_URL_09 }}"
+            "${{ vars.LIST_URL_10 }}"
+            "${{ vars.LIST_URL_11 }}"
+            "${{ vars.LIST_URL_12 }}"
+          )
+          for url in "${urls[@]}"; do
+            curl -s "$url" | grep -v '^ *#' | grep -v '^ *$' >> raw_domains.txt
+          done
+
+      - name: Filtrar e validar domínios
+        run: |
+          # Remover espaços em branco à esquerda e à direita e capturar apenas domínios válidos
+          sed 's/^[ \t]*//;s/[ \t]*$//' raw_domains.txt | grep -E '^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$' > valid_domains.txt
+
+      - name: Remover domínios duplicados e gerar lista final
+        run: |
+          sort -u valid_domains.txt -o domains.txt
+
+      - name: Verificar mudanças
+        id: check_changes
+        run: |
+          if ! git diff --exit-code domains.txt; then
+            echo "CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Commit e push das mudanças
+        if: env.CHANGES == 'true'
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add domains.txt
+          git commit -m "Release $(date +'%Y/%m/%d')"  # Commit com data no formato YYYY/MM/DD
+          git push
+
+      - name: Clean old commits
+        run: |
+          curl -fsSL -o bfg.jar https://repo1.maven.org/maven2/com/madgag/bfg/1.15.0/bfg-1.15.0.jar && \
+          git clone --mirror https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} repo && \
+          java -jar bfg.jar --strip-blobs-bigger-than 10K -fs 100M repo && \
+          cd repo && \
+          git reflog expire --expire=now --all && \
+          git gc --prune=now --aggressive && \
+          git push origin --force || echo
+          cd ../ && rm -rf repo
+
+      - name: Git init
+        run: |
+          sleep 12
+          git clone --depth 1 https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} repo && cd repo && \
+          git checkout --orphan TEMP && \
+          git add -A && \
+          git config user.name "Nel [bot]" && \
+          git config user.email '<>' && \
+          git commit -am "Release $(date +'%Y/%m/%d')"  # Commit com data no formato YYYY/MM/DD
+          git branch -D main && \
+          git branch -m main && \
+          git push -f origin main && \
+          cd ../ && rm -rf repo
+
+      - name: Delete workflow runs
+        uses: GitRML/delete-workflow-runs@main
+        with:
+          retain_days: 1
+          keep_minimum_runs: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
