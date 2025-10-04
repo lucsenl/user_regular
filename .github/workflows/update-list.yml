@@ -1,0 +1,124 @@
+name: Update List
+
+on:
+  schedule:
+    - cron: '0 12 * * *' # Executa todos os dias ao meio-dia (UTC)
+  workflow_dispatch:
+
+jobs:
+  update-list:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar as listas e extrair apenas os domínios
+        run: |
+          urls=(
+            "${{ vars.BLOCKLIST_URL_01 }}"
+            "${{ vars.BLOCKLIST_URL_02 }}"
+            "${{ vars.BLOCKLIST_URL_03 }}"
+            "${{ vars.BLOCKLIST_URL_04 }}"
+            "${{ vars.BLOCKLIST_URL_05 }}"
+            "${{ vars.BLOCKLIST_URL_06 }}"
+            "${{ vars.BLOCKLIST_URL_07 }}"
+            "${{ vars.BLOCKLIST_URL_08 }}"
+            "${{ vars.BLOCKLIST_URL_09 }}"
+            "${{ vars.BLOCKLIST_URL_10 }}"
+            "${{ vars.BLOCKLIST_URL_11 }}"
+            "${{ vars.BLOCKLIST_URL_12 }}"
+          )
+          > raw_domains.txt
+          for url in "${urls[@]}"; do
+            curl -s "$url" | grep -v '^ *#' | grep -v '^ *$' | awk '{ print $2 }' >> raw_domains.txt
+          done
+
+      - name: Baixar a whitelist
+        run: |
+          allowlists=(
+            "${{ vars.ALLOWLIST_URL_01 }}"
+            "${{ vars.ALLOWLIST_URL_02 }}"
+          )
+          > whitelist.txt
+          for url in "${allowlists[@]}"; do
+            curl -s "$url" | grep -v '^ *#' | grep -v '^ *$' >> whitelist.txt
+          done
+
+      - name: Expandir a whitelist para considerar subdomínios e www
+        run: |
+          awk '{
+            print;
+            if ($0 ~ /^www\./) print substr($0,5);
+            else print "www."$0;
+          }' whitelist.txt | sort -u > expanded_whitelist.txt
+
+      - name: Filtrar e validar domínios
+        run: |
+          sed 's/^[ \t]*//;s/[ \t]*$//' raw_domains.txt | grep -Ei '^([a-z0-9-]+\.)+[a-z]{2,}$' > valid_domains.txt
+
+      - name: Remover domínios e subdomínios presentes na allowlist
+        run: |
+          awk 'NR==FNR { wl[$0]; next } {
+            keep = 1
+            for (domain in wl) {
+              if ($0 == domain || $0 ~ ("\\." domain "$")) {
+                keep = 0
+                break
+              }
+            }
+            if (keep) print
+          }' expanded_whitelist.txt valid_domains.txt > filtered_domains.txt
+
+      - name: Remover duplicatas e gerar lista final em formato hosts
+        run: |
+          sort -u filtered_domains.txt | awk '{ print "0.0.0.0 "$0 }' > domains.txt
+
+      - name: Verificar mudanças
+        id: check_changes
+        run: |
+          git fetch origin
+          if ! git diff --exit-code domains.txt; then
+            echo "CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Commit e push das mudanças
+        if: env.CHANGES == 'true'
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add domains.txt
+          git commit -m "Release $(date +'%Y/%m/%d')"
+          git push
+
+      - name: Clean old commits (BFG)
+        run: |
+          curl -fsSL -o bfg.jar https://repo1.maven.org/maven2/com/madgag/bfg/1.15.0/bfg-1.15.0.jar && \
+          git clone --mirror https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} repo && \
+          java -jar bfg.jar --strip-blobs-bigger-than 10K -fs 100M repo && \
+          cd repo && \
+          git reflog expire --expire=now --all && \
+          git gc --prune=now --aggressive && \
+          git push origin --force || echo
+          cd ../ && rm -rf repo
+
+      - name: Git init (recriar histórico limpo)
+        run: |
+          sleep 12
+          git clone --depth 1 https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} repo && cd repo && \
+          git checkout --orphan TEMP && \
+          git add -A && \
+          git config user.name "Nel [bot]" && \
+          git config user.email '<>' && \
+          git commit -am "Release $(date +'%Y/%m/%d')" && \
+          git branch -D main && \
+          git branch -m main && \
+          git push -f origin main && \
+          cd ../ && rm -rf repo
+
+      - name: Delete workflow runs
+        uses: GitRML/delete-workflow-runs@main
+        with:
+          retain_days: 1
+          keep_minimum_runs: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
